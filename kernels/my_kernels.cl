@@ -1,44 +1,87 @@
-/// OpenCL kernel for image processing
-
-__kernel void process_image(__global const uchar* input, 
-                           __global uchar* output,
-                           const int width,
-                           const int height) {
-    // Get the work-item's position
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-    
-    // Boundary check
-    if (x >= width || y >= height)
-        return;
-    
-    // Calculate 1D position in the buffer
-    int pos = y * width + x;
-    
-    // Simple image inversion (you can replace this with more complex processing)
-    output[pos] = 255 - input[pos];
-    
-    // Example of more complex processing (uncomment and modify as needed):
-    /*
-    // Apply a simple blur effect
-    int sum = 0;
-    int count = 0;
-    
-    // Process 3x3 neighborhood
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            int nx = x + i;
-            int ny = y + j;
-            
-            // Check boundaries
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                sum += input[ny * width + nx];
-                count++;
-            }
-        }
+__kernel void calculateHistogram(__global const unsigned char* image, 
+                                __global int* histogram,
+                                const int totalPixels) {
+    // Get global ID
+    int gid = get_global_id(0);
+    // Clear histogram in local memory to avoid race conditions
+    // This is a simplified approach - in a full solution we'd use local memory
+    if (gid < 256) {
+        histogram[gid] = 0;
     }
+
+    // Make sure all work items see the cleared histogram
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    // Process pixels
+    if (gid < totalPixels) {
+        unsigned char pixelValue = image[gid];
+        atomic_inc(&histogram[pixelValue]);
+    }
+}
+
+__kernel void prefixSum(__global int* input, 
+                       __global int* output,
+                       const int n) {
+    __local int temp[256];
+    int gid = get_global_id(0);
+    if (gid < n) {
+        temp[gid] = input[gid];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = 1; stride < n; stride *= 2) {
+
+        int index = (gid + 1) * 2 * stride - 1;
+
+        if (index < n) {
+            temp[index] += temp[index - stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (gid == 0) {
+        temp[n - 1] = 0;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
     
-    // Calculate average
-    output[pos] = sum / count;
-    */
+    for (int stride = n / 2; stride > 0; stride /= 2) {
+        int index = (gid + 1) * 2 * stride - 1;
+        if (index < n) {
+            int t = temp[index];
+            temp[index] += temp[index - stride];
+            temp[index - stride] = t;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    } 
+    if (gid < n) {
+        output[gid] = temp[gid];
+    }
+}
+
+__kernel void addOriginalValues(__global int* scannedHistogram, 
+                              __global int* originalHistogram,
+                              const int n) {
+    int gid = get_global_id(0);
+    if (gid < n) {
+        scannedHistogram[gid] += originalHistogram[gid];
+    }
+}
+
+__kernel void normalizeLUT(__global int* cumulativeHistogram, 
+                          __global int* lut,
+                          const int totalPixels,
+                          const int numBins) {
+    int gid = get_global_id(0);
+    if (gid < numBins) {
+        lut[gid] = (int)((float)cumulativeHistogram[gid] / totalPixels * 255);
+    }
+}
+
+__kernel void applyLUT(__global const unsigned char* inputImage, 
+                      __global const int* lut,
+                      __global unsigned char* outputImage,
+                      const int totalPixels) {
+    int gid = get_global_id(0);
+    if (gid < totalPixels) {
+        unsigned char pixelValue = inputImage[gid];
+        outputImage[gid] = (unsigned char)lut[pixelValue];
+    }
 }
