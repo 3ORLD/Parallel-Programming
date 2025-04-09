@@ -51,13 +51,14 @@ CImg<unsigned char> createHistogramImage(const vector<int>& histogram, int maxHe
 
 // Prints command-line usage instructions
 void print_help() {
-    cerr << "Usage: -p <platform> -d <device> -l (list devices) -b <bins> -c (color) -hp (high-precision 16-bit) -h (help)" << endl;
+    cerr << "Usage: -p <platform> -d <device> -t <type: gpu/cpu> -l (list devices) -b <bins> -c (color) -hp (high-precision 16-bit) -h (help)" << endl;
 }
 
 int main(int argc, char **argv) {
     string image_filename = "mdr16.ppm";
     int selected_platform = 0, selected_device = 0, num_bins = -1;
     bool list_devices = false, use_color = false, high_precision_16bit = false;
+    string device_type_str = "gpu"; // Default to GPU
 
     // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
@@ -65,6 +66,7 @@ int main(int argc, char **argv) {
         if (string(argv[i]) == "-l") { list_devices = true; }
         if (string(argv[i]) == "-p" && i + 1 < argc) { selected_platform = stoi(argv[++i]); }
         if (string(argv[i]) == "-d" && i + 1 < argc) { selected_device = stoi(argv[++i]); }
+        if (string(argv[i]) == "-t" && i + 1 < argc) { device_type_str = string(argv[++i]); }
         if (string(argv[i]) == "-b" && i + 1 < argc) { num_bins = stoi(argv[++i]); }
         if (string(argv[i]) == "-c") { use_color = true; }
         if (string(argv[i]) == "-hp") { high_precision_16bit = true; }
@@ -77,9 +79,14 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < platforms.size(); ++i) {
             cout << "Platform " << i << ": " << platforms[i].getInfo<CL_PLATFORM_NAME>() << endl;
             vector<cl::Device> devices;
-            platforms[i].getDevices(CL_DEVICE_TYPE_GPU, &devices);
-            for (size_t j = 0; j < devices.size(); ++j) {
-                cout << "  Device " << j << ": " << devices[j].getInfo<CL_DEVICE_NAME>() << endl;
+            try {
+                platforms[i].getDevices(CL_DEVICE_TYPE_ALL, &devices);
+                for (size_t j = 0; j < devices.size(); ++j) {
+                    string type = (devices[j].getInfo<CL_DEVICE_TYPE>() == CL_DEVICE_TYPE_GPU) ? "GPU" : "CPU";
+                    cout << "  Device " << j << ": " << devices[j].getInfo<CL_DEVICE_NAME>() << " (" << type << ")" << endl;
+                }
+            } catch (const cl::Error& e) {
+                cout << "  No devices available: " << e.what() << " (" << e.err() << ")" << endl;
             }
         }
         return 0;
@@ -105,24 +112,86 @@ int main(int argc, char **argv) {
 
         cout << "Bit depth: " << bit_depth << "-bit, Channels: " << channels << ", Bins: " << num_bins << endl;
 
-        // Setup OpenCL platform and device
+        // Setup OpenCL platform
         vector<cl::Platform> platforms;
         cl::Platform::get(&platforms);
+        if (platforms.empty()) {
+            cerr << "No OpenCL platforms available on this system." << endl;
+            return 1;
+        }
+        if (selected_platform >= static_cast<int>(platforms.size())) {
+            cerr << "Invalid platform index: " << selected_platform << ". Only " << platforms.size() << " platforms available." << endl;
+            return 1;
+        }
         cl::Platform platform = platforms[selected_platform];
         cout << "Platform: " << platform.getInfo<CL_PLATFORM_NAME>() << endl;
 
-        cl_context_properties properties[] = {CL_CONTEXT_PLATFORM, (cl_context_properties)(platform)(), 0};
-        cl::Context context(CL_DEVICE_TYPE_GPU, properties);
-        vector<cl::Device> devices = context.getInfo<CL_CONTEXT_DEVICES>();
-        cl::Device device = devices[selected_device];
-        cout << "Device: " << device.getInfo<CL_DEVICE_NAME>() << endl;
+        // Determine device type from command-line argument
+        cl_device_type requested_type = (device_type_str == "cpu") ? CL_DEVICE_TYPE_CPU : CL_DEVICE_TYPE_GPU;
 
-        cl_int err = CL_SUCCESS;
-        cl::CommandQueue queue(context, device, 0, &err);
-        if (err != CL_SUCCESS) {
-            cerr << "Failed to create command queue: " << err << endl;
+        // Get all devices for the platform first
+        vector<cl::Device> devices;
+        try {
+            platform.getDevices(CL_DEVICE_TYPE_ALL, &devices);
+        } catch (const cl::Error& e) {
+            cerr << "Failed to retrieve devices on platform " << selected_platform << ": " << e.what() << " (" << e.err() << ")" << endl;
             return 1;
         }
+
+        if (devices.empty()) {
+            cerr << "No devices available on platform " << selected_platform << ". Available platforms and devices:" << endl;
+            for (size_t i = 0; i < platforms.size(); ++i) {
+                cout << "Platform " << i << ": " << platforms[i].getInfo<CL_PLATFORM_NAME>() << endl;
+                vector<cl::Device> avail_devices;
+                try {
+                    platforms[i].getDevices(CL_DEVICE_TYPE_ALL, &avail_devices);
+                    for (size_t j = 0; j < avail_devices.size(); ++j) {
+                        string type = (avail_devices[j].getInfo<CL_DEVICE_TYPE>() == CL_DEVICE_TYPE_GPU) ? "GPU" : "CPU";
+                        cout << "  Device " << j << ": " << avail_devices[j].getInfo<CL_DEVICE_NAME>() << " (" << type << ")" << endl;
+                    }
+                } catch (const cl::Error& e) {
+                    cout << "  No devices available: " << e.what() << " (" << e.err() << ")" << endl;
+                }
+            }
+            return 1;
+        }
+
+        // Filter devices by requested type
+        vector<cl::Device> filtered_devices;
+        for (const auto& dev : devices) {
+            if (dev.getInfo<CL_DEVICE_TYPE>() == requested_type) {
+                filtered_devices.push_back(dev);
+            }
+        }
+
+        // If no devices match the requested type, fall back to any available device
+        if (filtered_devices.empty()) {
+            cout << "No " << (requested_type == CL_DEVICE_TYPE_GPU ? "GPU" : "CPU") 
+                 << " devices found on platform " << selected_platform << ". Falling back to available device." << endl;
+            filtered_devices = devices; // Use whatever is available
+        }
+
+        if (selected_device >= static_cast<int>(filtered_devices.size())) {
+            cerr << "Invalid device index: " << selected_device << ". Only " << filtered_devices.size() 
+                 << " devices available for type " << (requested_type == CL_DEVICE_TYPE_GPU ? "GPU" : "CPU") 
+                 << " on platform " << selected_platform << "." << endl;
+            cout << "Available devices on platform " << selected_platform << ":" << endl;
+            for (size_t j = 0; j < devices.size(); ++j) {
+                string type = (devices[j].getInfo<CL_DEVICE_TYPE>() == CL_DEVICE_TYPE_GPU) ? "GPU" : "CPU";
+                cout << "  Device " << j << ": " << devices[j].getInfo<CL_DEVICE_NAME>() << " (" << type << ")" << endl;
+            }
+            return 1;
+        }
+
+        cl::Device device = filtered_devices[selected_device];
+        cl_device_type device_type = device.getInfo<CL_DEVICE_TYPE>();
+        cout << "Device: " << device.getInfo<CL_DEVICE_NAME>()
+             << " (" << (device_type == CL_DEVICE_TYPE_GPU ? "GPU" : "CPU") << ")" << endl;
+
+        // Create OpenCL context and command queue
+        cl_context_properties properties[] = {CL_CONTEXT_PLATFORM, (cl_context_properties)(platform)(), 0};
+        cl::Context context(device, properties);
+        cl::CommandQueue queue(context, device, 0);
 
         // Load kernel source based on bit depth
         string kernelSource = loadKernelSource(bit_depth == 8 ? "kernels/8_bit.cl" : "kernels/16_bit.cl");
@@ -177,20 +246,12 @@ int main(int argc, char **argv) {
             hist_kernel.setArg(3, num_bins);
             hist_kernel.setArg(4, max_value);
 
-            size_t local_size = min(256, num_bins); // Work-group size
+            size_t local_size = min(static_cast<size_t>(device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>()), static_cast<size_t>(num_bins));
             size_t global_size = ((total_pixels + local_size - 1) / local_size) * local_size;
 
             auto t1 = chrono::high_resolution_clock::now();
-            cl_int kernelErr = queue.enqueueNDRangeKernel(hist_kernel, cl::NullRange, cl::NDRange(global_size), cl::NDRange(local_size));
-            if (kernelErr != CL_SUCCESS) {
-                cerr << "Histogram kernel enqueue error: " << kernelErr << endl;
-                return 1;
-            }
-            cl_int finishErr = queue.finish();
-            if (finishErr != CL_SUCCESS) {
-                cerr << "Queue finish error after histogram: " << finishErr << endl;
-                return 1;
-            }
+            queue.enqueueNDRangeKernel(hist_kernel, cl::NullRange, cl::NDRange(global_size), cl::NDRange(local_size));
+            queue.finish();
             auto t2 = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " Histogram Time: " << chrono::duration_cast<chrono::milliseconds>(t2 - t1).count() << "ms" << endl;
 
@@ -206,20 +267,12 @@ int main(int argc, char **argv) {
             scan_kernel.setArg(1, d_cum_hist);
             scan_kernel.setArg(2, num_bins);
 
-            size_t scan_local_size = min(256, num_bins);
+            size_t scan_local_size = min(static_cast<size_t>(device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>()), static_cast<size_t>(num_bins));
             size_t scan_global_size = ((num_bins + scan_local_size - 1) / scan_local_size) * scan_local_size;
 
             t1 = chrono::high_resolution_clock::now();
-            kernelErr = queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(scan_global_size), cl::NDRange(scan_local_size));
-            if (kernelErr != CL_SUCCESS) {
-                cerr << "Prefix sum kernel enqueue error: " << kernelErr << endl;
-                return 1;
-            }
-            finishErr = queue.finish();
-            if (finishErr != CL_SUCCESS) {
-                cerr << "Queue finish error after prefix sum: " << finishErr << endl;
-                return 1;
-            }
+            queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(scan_global_size), cl::NDRange(scan_local_size));
+            queue.finish();
             t2 = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " Blelloch Scan Time: " << chrono::duration_cast<chrono::milliseconds>(t2 - t1).count() << "ms" << endl;
 
@@ -235,16 +288,8 @@ int main(int argc, char **argv) {
             hs_scan_kernel.setArg(2, num_bins);
 
             t1 = chrono::high_resolution_clock::now();
-            kernelErr = queue.enqueueNDRangeKernel(hs_scan_kernel, cl::NullRange, cl::NDRange(scan_global_size), cl::NDRange(scan_local_size));
-            if (kernelErr != CL_SUCCESS) {
-                cerr << "Hillis-Steele kernel enqueue error: " << kernelErr << endl;
-                return 1;
-            }
-            finishErr = queue.finish();
-            if (finishErr != CL_SUCCESS) {
-                cerr << "Queue finish error after Hillis-Steele: " << finishErr << endl;
-                return 1;
-            }
+            queue.enqueueNDRangeKernel(hs_scan_kernel, cl::NullRange, cl::NDRange(scan_global_size), cl::NDRange(scan_local_size));
+            queue.finish();
             t2 = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " Hillis-Steele Scan Time: " << chrono::duration_cast<chrono::milliseconds>(t2 - t1).count() << "ms" << endl;
 
@@ -261,16 +306,8 @@ int main(int argc, char **argv) {
             lut_kernel.setArg(3, num_bins);
             lut_kernel.setArg(4, max_value);
 
-            kernelErr = queue.enqueueNDRangeKernel(lut_kernel, cl::NullRange, cl::NDRange(num_bins), cl::NullRange);
-            if (kernelErr != CL_SUCCESS) {
-                cerr << "LUT kernel enqueue error: " << kernelErr << endl;
-                return 1;
-            }
-            finishErr = queue.finish();
-            if (finishErr != CL_SUCCESS) {
-                cerr << "Queue finish error after LUT creation: " << finishErr << endl;
-                return 1;
-            }
+            queue.enqueueNDRangeKernel(lut_kernel, cl::NullRange, cl::NDRange(num_bins), cl::NullRange);
+            queue.finish();
 
             t_mem_start = chrono::high_resolution_clock::now();
             queue.enqueueReadBuffer(d_lut, CL_TRUE, 0, num_bins * sizeof(int), luts[c].data());
@@ -286,16 +323,8 @@ int main(int argc, char **argv) {
             apply_kernel.setArg(4, num_bins);
 
             t1 = chrono::high_resolution_clock::now();
-            kernelErr = queue.enqueueNDRangeKernel(apply_kernel, cl::NullRange, cl::NDRange(global_size), cl::NDRange(local_size));
-            if (kernelErr != CL_SUCCESS) {
-                cerr << "Apply LUT kernel enqueue error: " << kernelErr << endl;
-                return 1;
-            }
-            finishErr = queue.finish();
-            if (finishErr != CL_SUCCESS) {
-                cerr << "Queue finish error after apply LUT: " << finishErr << endl;
-                return 1;
-            }
+            queue.enqueueNDRangeKernel(apply_kernel, cl::NullRange, cl::NDRange(global_size), cl::NDRange(local_size));
+            queue.finish();
             t2 = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " Apply LUT Time: " << chrono::duration_cast<chrono::milliseconds>(t2 - t1).count() << "ms" << endl;
 
