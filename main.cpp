@@ -201,7 +201,7 @@ int main(int argc, char **argv) {
 
         // Create OpenCL context and command queue
         cl_context_properties properties[] = {CL_CONTEXT_PLATFORM, (cl_context_properties)(platform)(), 0};
-        cl::Context context(device, properties);
+        cl::Context context({device}, properties);
         cl::CommandQueue queue(context, device, 0);
 
         // Load kernel source based on bit depth
