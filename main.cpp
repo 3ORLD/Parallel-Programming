@@ -25,14 +25,14 @@ CImg<unsigned char> createHistogramImage(const vector<int>& histogram, int maxHe
     CImg<unsigned char> histImg(280, maxHeight + 30, 1, 3, 255);
     const unsigned char black[] = {0, 0, 0}, white[] = {255, 255, 255}, gray[] = {169, 169, 169};
 
-    histImg.draw_rectangle(10, maxHeight + 10, 270, maxHeight + 30, black, 1.0f); // Base rectangle
-    histImg.draw_rectangle(10, 10, 270, maxHeight + 10, white, 1.0f); // Background
+    histImg.draw_rectangle(10, maxHeight + 10, 270, maxHeight + 30, black, 1.0f);
+    histImg.draw_rectangle(10, 10, 270, maxHeight + 10, white, 1.0f);
     for (int y = 0; y < maxHeight; y += 20) {
-        histImg.draw_line(10, maxHeight + 10 - y, 270, maxHeight + 10 - y, gray); // Grid lines
+        histImg.draw_line(10, maxHeight + 10 - y, 270, maxHeight + 10 - y, gray);
     }
-    histImg.draw_rectangle(0, 0, 279, maxHeight + 29, white, 1); // Border
-    histImg.draw_line(10, maxHeight + 10, 270, maxHeight + 10, black); // X-axis
-    histImg.draw_line(10, 10, 10, maxHeight + 10, black); // Y-axis
+    histImg.draw_rectangle(0, 0, 279, maxHeight + 29, white, 1);
+    histImg.draw_line(10, maxHeight + 10, 270, maxHeight + 10, black);
+    histImg.draw_line(10, 10, 10, maxHeight + 10, black);
 
     int numBins = histogram.size();
     float binWidth = 260.0f / numBins;
@@ -51,7 +51,7 @@ CImg<unsigned char> createHistogramImage(const vector<int>& histogram, int maxHe
 
 // Prints command-line usage instructions
 void print_help() {
-    cerr << "Usage: -p <platform> -d <device> -t <type: gpu/cpu> -l (list devices) -b <bins> -c (color) -hp (high-precision 16-bit) -h (help)" << endl;
+    cerr << "Usage: -p <platform> -d <device> -t <type: gpu/cpu> -l (list devices) -b <bins> -c (color) -hp (high-precision 16-bit) -h (help) -i <image>" << endl;
 }
 
 int main(int argc, char **argv) {
@@ -70,6 +70,7 @@ int main(int argc, char **argv) {
         if (string(argv[i]) == "-b" && i + 1 < argc) { num_bins = stoi(argv[++i]); }
         if (string(argv[i]) == "-c") { use_color = true; }
         if (string(argv[i]) == "-hp") { high_precision_16bit = true; }
+        if (string(argv[i]) == "-i" && i + 1 < argc) { image_filename = string(argv[++i]); }
     }
 
     // List available platforms and devices if requested
@@ -93,19 +94,30 @@ int main(int argc, char **argv) {
     }
 
     try {
-        // Load and display input image
+        // Load input image
         CImg<unsigned short> image_input(image_filename.c_str());
-        CImgDisplay disp_input(image_input, "Input Image");
 
+        // Determine bit depth and channels
         int width = image_input.width(), height = image_input.height();
         int total_pixels = width * height;
         int channels = image_input.spectrum();
         use_color = use_color || (channels > 1);
 
-        cout << "Image has " << channels << " channels" << endl;
-
-        // Determine bit depth and bin settings
         int bit_depth = (image_input.max() > 255) ? 16 : 8;
+        cout << "Image has " << channels << " channels" << endl;
+        cout << "Input Image Min: " << image_input.min() << ", Max: " << image_input.max() << endl;
+
+        // Convert input image for display
+        CImg<unsigned char> display_input(width, height, 1, channels);
+        if (bit_depth == 8) {
+            cimg_forXYC(image_input, x, y, c) {
+                display_input(x, y, 0, c) = static_cast<unsigned char>(image_input(x, y, 0, c));
+            }
+        } else {
+            display_input = image_input.get_normalize(0, 255);
+        }
+        CImgDisplay disp_input(display_input, "Input Image");
+
         int max_value = (bit_depth == 8) ? 255 : 65535;
         int max_bins = (bit_depth == 8) ? 256 : (high_precision_16bit ? 65536 : 256);
         num_bins = (num_bins > 0) ? min(num_bins, max_bins) : max_bins;
@@ -164,11 +176,10 @@ int main(int argc, char **argv) {
             }
         }
 
-        // If no devices match the requested type, fall back to any available device
         if (filtered_devices.empty()) {
             cout << "No " << (requested_type == CL_DEVICE_TYPE_GPU ? "GPU" : "CPU") 
                  << " devices found on platform " << selected_platform << ". Falling back to available device." << endl;
-            filtered_devices = devices; // Use whatever is available
+            filtered_devices = devices;
         }
 
         if (selected_device >= static_cast<int>(filtered_devices.size())) {
@@ -208,7 +219,7 @@ int main(int argc, char **argv) {
         vector<vector<int>> cum_histograms(channels, vector<int>(num_bins, 0));
         vector<vector<int>> hs_cum_histograms(channels, vector<int>(num_bins, 0));
         vector<vector<int>> luts(channels, vector<int>(num_bins, 0));
-        CImg<unsigned short> final_output(width, height, 1, channels);
+        CImg<unsigned short> final_output(width, height, 1, channels, 0); // Initialize to 0
 
         // Start total execution timer
         auto total_start = chrono::high_resolution_clock::now();
@@ -221,6 +232,12 @@ int main(int argc, char **argv) {
                     h_input[y * width + x] = image_input(x, y, 0, c);
                 }
             }
+
+            // Debug: Check input range and sample values
+            cout << "Channel " << c << " Input Min: " << *min_element(h_input.begin(), h_input.end())
+                 << ", Max: " << *max_element(h_input.begin(), h_input.end()) << endl;
+            cout << "Sample Input Values (Top-Left, Mid, Bottom-Right): " 
+                 << h_input[0] << ", " << h_input[total_pixels / 2] << ", " << h_input[total_pixels - 1] << endl;
 
             // OpenCL buffers
             cl::Buffer d_input(context, CL_MEM_READ_ONLY, total_pixels * sizeof(unsigned short));
@@ -246,7 +263,7 @@ int main(int argc, char **argv) {
             hist_kernel.setArg(3, num_bins);
             hist_kernel.setArg(4, max_value);
 
-            size_t local_size = min(static_cast<size_t>(device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>()), static_cast<size_t>(num_bins));
+            size_t local_size = min(static_cast<size_t>(device.getInfo<CL_DEVICE_MAX_WORK_GROUP_SIZE>()), static_cast<size_t>(256));
             size_t global_size = ((total_pixels + local_size - 1) / local_size) * local_size;
 
             auto t1 = chrono::high_resolution_clock::now();
@@ -260,6 +277,11 @@ int main(int argc, char **argv) {
             queue.enqueueReadBuffer(d_hist, CL_TRUE, 0, num_bins * sizeof(int), histograms[c].data());
             t_mem_end = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " Histogram Read Time: " << chrono::duration_cast<chrono::milliseconds>(t_mem_end - t_mem_start).count() << "ms" << endl;
+
+            // Debug: Check histogram
+            int hist_sum = 0;
+            for (int i = 0; i < num_bins; i++) hist_sum += histograms[c][i];
+            cout << "Channel " << c << " Histogram Sum: " << hist_sum << " (should match total_pixels: " << total_pixels << ")" << endl;
 
             // Blelloch Scan
             cl::Kernel scan_kernel(program, bit_depth == 8 ? "prefixSum" : "prefixSum16");
@@ -306,13 +328,20 @@ int main(int argc, char **argv) {
             lut_kernel.setArg(3, num_bins);
             lut_kernel.setArg(4, max_value);
 
+            t1 = chrono::high_resolution_clock::now();
             queue.enqueueNDRangeKernel(lut_kernel, cl::NullRange, cl::NDRange(num_bins), cl::NullRange);
             queue.finish();
+            t2 = chrono::high_resolution_clock::now();
+            cout << "Channel " << c << " LUT Normalization Time: " << chrono::duration_cast<chrono::milliseconds>(t2 - t1).count() << "ms" << endl;
 
             t_mem_start = chrono::high_resolution_clock::now();
             queue.enqueueReadBuffer(d_lut, CL_TRUE, 0, num_bins * sizeof(int), luts[c].data());
             t_mem_end = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " LUT Read Time: " << chrono::duration_cast<chrono::milliseconds>(t_mem_end - t_mem_start).count() << "ms" << endl;
+
+            // Debug: Check LUT
+            cout << "Channel " << c << " LUT Min: " << *min_element(luts[c].begin(), luts[c].end())
+                 << ", Max: " << *max_element(luts[c].begin(), luts[c].end()) << endl;
 
             // Apply LUT to equalize image
             cl::Kernel apply_kernel(program, bit_depth == 8 ? "applyLUT" : "applyLUT16");
@@ -335,21 +364,55 @@ int main(int argc, char **argv) {
             t_mem_end = chrono::high_resolution_clock::now();
             cout << "Channel " << c << " Output Read Time: " << chrono::duration_cast<chrono::milliseconds>(t_mem_end - t_mem_start).count() << "ms" << endl;
 
+            // Debug: Check output range and sample values across the image
+            cout << "Channel " << c << " Output Min: " << *min_element(h_output.begin(), h_output.end())
+                 << ", Max: " << *max_element(h_output.begin(), h_output.end()) << endl;
+            cout << "Sample Output Values (Top-Left, Top-Right, Mid, Bottom-Left, Bottom-Right): " 
+                 << h_output[0] << ", " << h_output[width - 1] << ", " << h_output[total_pixels / 2] << ", "
+                 << h_output[(height - 1) * width] << ", " << h_output[total_pixels - 1] << endl;
+
+            // Populate final_output with detailed checking
+            int non_zero_count = 0;
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
-                    final_output(x, y, 0, c) = h_output[y * width + x];
+                    unsigned short val = h_output[y * width + x];
+                    final_output(x, y, 0, c) = val;
+                    if (val > 0) non_zero_count++;
                 }
             }
+            cout << "Channel " << c << " Non-Zero Pixels in final_output: " << non_zero_count << " / " << total_pixels << endl;
         }
 
         // End total execution timer
         auto total_end = chrono::high_resolution_clock::now();
         cout << "\nTotal Program Execution Time: " << chrono::duration_cast<chrono::milliseconds>(total_end - total_start).count() << "ms" << endl;
 
-        // Display results
-        CImgDisplay disp_output(final_output, "Equalized Image");
-        vector<CImgDisplay> hist_displays;
+        // Debug: Check final output range and samples
+        cout << "Final Output Min: " << final_output.min() << ", Max: " << final_output.max() << endl;
+        cout << "Sample Final Output Values (Top-Left, Top-Right, Mid, Bottom-Left, Bottom-Right): " 
+             << final_output(0, 0, 0, 0) << ", " << final_output(width - 1, 0, 0, 0) << ", " 
+             << final_output(width / 2, height / 2, 0, 0) << ", " << final_output(0, height - 1, 0, 0) << ", " 
+             << final_output(width - 1, height - 1, 0, 0) << endl;
 
+        // Display results
+        CImg<unsigned char> display_output(width, height, 1, channels);
+        if (bit_depth == 8) {
+            cimg_forXYC(final_output, x, y, c) {
+                display_output(x, y, 0, c) = static_cast<unsigned char>(final_output(x, y, 0, c));
+            }
+        } else {
+            display_output = final_output.get_normalize(0, 255);
+        }
+        CImgDisplay disp_output(display_output, "Equalized Image");
+
+        // Debug: Check display output range and sample values
+        cout << "Display Output Min: " << (int)display_output.min() << ", Max: " << (int)display_output.max() << endl;
+        cout << "Sample Display Output Values (Top-Left, Top-Right, Mid, Bottom-Left, Bottom-Right): " 
+             << (int)display_output(0, 0, 0, 0) << ", " << (int)display_output(width - 1, 0, 0, 0) << ", " 
+             << (int)display_output(width / 2, height / 2, 0, 0) << ", " << (int)display_output(0, height - 1, 0, 0) << ", " 
+             << (int)display_output(width - 1, height - 1, 0, 0) << endl;
+
+        vector<CImgDisplay> hist_displays;
         for (int c = 0; c < channels; c++) {
             string hist_title = "Histogram Channel " + to_string(c);
             string cum_hist_title = "Blelloch Cumulative Histogram Channel " + to_string(c);
